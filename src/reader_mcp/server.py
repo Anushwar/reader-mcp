@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 from typing import Annotated, Any
 
 from mcp.server.mcpserver import MCPServer
@@ -50,6 +51,8 @@ class OpenAIFile(BaseModel):
 
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=False)
+IMMUTABLE_SOURCES = ("upload:", "file:")
+FINISHED_KEPT = 1000
 
 
 def build_server(settings: Settings, *, http: bool = False) -> MCPServer:
@@ -61,9 +64,11 @@ def build_server(settings: Settings, *, http: bool = False) -> MCPServer:
         return ToolError(str(exc))
 
     # Retry-safe ingestion: hosts give up on tool calls after ~60s, but the work shouldn't be lost.
-    # Each source runs as one background job; a repeat call joins it, or gets the finished doc_id.
+    # Each source runs as one background job, and a repeat call joins it. Sources that can't change
+    # (an upload, a ChatGPT file) also remember their finished doc_id, because the upload is consumed
+    # and ChatGPT's download link expires. URLs are fetched again, in case the document changed.
     jobs: dict[str, asyncio.Task[dict[str, Any]]] = {}
-    finished: dict[str, str] = {}
+    finished: OrderedDict[str, str] = OrderedDict()
 
     def forget(key: str, task: asyncio.Task[dict[str, Any]]) -> None:
         jobs.pop(key, None)
@@ -71,10 +76,13 @@ def build_server(settings: Settings, *, http: bool = False) -> MCPServer:
             task.exception()  # mark a failure as seen when nobody is awaiting the job anymore
 
     async def run_ingest(key: str | None, obtain: Any) -> dict[str, Any]:
+        await asyncio.to_thread(store.purge_expired)  # before obtaining, so it can't delete the file we're about to use
         incoming: Incoming = await obtain()
         result = await store.ingest(incoming)
-        if key:
+        if key and key.startswith(IMMUTABLE_SOURCES):
             finished[key] = result["doc_id"]
+            while len(finished) > FINISHED_KEPT:
+                finished.popitem(last=False)
         return result
 
     @mcp.tool(
@@ -115,8 +123,7 @@ def build_server(settings: Settings, *, http: bool = False) -> MCPServer:
         else:
             key, obtain = None, lambda: asyncio.to_thread(decode_base64, content_base64 or "", filename, settings)
 
-        # Local files may change on disk, so only remote sources reuse a finished result by key.
-        if key and not path and key in finished and store.has(finished[key]):
+        if key in finished and store.has(finished[key]):
             return {**store.metadata(finished[key]), "already_ingested": True}
         task = jobs.get(key) if key else None
         if task is None:

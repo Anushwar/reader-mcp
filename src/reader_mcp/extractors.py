@@ -91,10 +91,15 @@ def _md_cell(value: str) -> str:
 
 
 def _pdf_properties(path: Path) -> dict[str, Any]:
-    """Document info via pypdf, which parses PDF dates; the text itself comes from pdfium."""
+    """Document info via pypdf, which parses PDF dates; the text itself comes from pdfium.
+
+    Best effort: a PDF pypdf can't parse may still be readable by pdfium, so don't fail on it."""
     from pypdf import PdfReader
 
-    reader = PdfReader(path)
+    try:
+        reader = PdfReader(path)
+    except Exception:
+        return {}
     if reader.is_encrypted:
         try:
             unlocked = reader.decrypt("")
@@ -117,6 +122,25 @@ def _pdf_properties(path: Path) -> dict[str, Any]:
     return _clean(info)
 
 
+def _pdfium_page_text(document: Any, index: int) -> str:
+    """One page's text; a corrupt page becomes empty instead of failing the whole document."""
+    try:
+        page = document[index]
+        try:
+            textpage = page.get_textpage()
+            try:
+                text = textpage.get_text_range()
+            finally:
+                textpage.close()
+        finally:
+            page.close()
+    except Exception:
+        return ""
+    # pdfium marks a hyphen it removed at a line break with U+FFFE; drop it to re-join the word.
+    text = text.replace("\r\n", "\n").replace("\r", "\n").replace("￾", "")
+    return LINE_BREAK_HYPHEN.sub("", text).strip()
+
+
 def extract_pdf(path: Path, filename: str) -> dict[str, Any]:
     import pypdfium2 as pdfium
 
@@ -125,14 +149,7 @@ def extract_pdf(path: Path, filename: str) -> dict[str, Any]:
     document = pdfium.PdfDocument(path)  # Chrome's PDF engine: ~25x faster than pure-Python parsing
     try:
         for index in range(len(document)):
-            page = document[index]
-            textpage = page.get_textpage()
-            text = textpage.get_text_range()
-            textpage.close()
-            page.close()
-            # pdfium marks a hyphen it removed at a line break with U+FFFE; drop it to re-join the word.
-            text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\ufffe", "")
-            pages.append(LINE_BREAK_HYPHEN.sub("", text).strip())
+            pages.append(_pdfium_page_text(document, index))
     finally:
         document.close()
 
@@ -332,13 +349,17 @@ def extract(path: Path, filename: str) -> dict[str, Any]:
 async def extract_isolated(path: Path, filename: str, timeout: float) -> dict[str, Any]:
     """Run `extract` in a child Python process so bad files can't hang or crash the server."""
     proc = await asyncio.create_subprocess_exec(
-        sys.executable, "-I", "-m", "reader_mcp.extractors", str(path), filename,
+        sys.executable, "-m", "reader_mcp.extractors", str(path), filename,
+        # `-m` puts the working directory on sys.path; the document's own folder holds no Python
+        # modules, so nothing there can be imported by mistake. (Not `-I`: that also drops
+        # PYTHONPATH and user site-packages, which some installs rely on.)
+        cwd=path.parent,
         stdin=asyncio.subprocess.DEVNULL,  # never share the MCP stdio pipe with the child
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout)
+        out, err = await asyncio.wait_for(proc.communicate(), timeout)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
@@ -346,7 +367,8 @@ async def extract_isolated(path: Path, filename: str, timeout: float) -> dict[st
     try:
         payload = json.loads(out)
     except ValueError:
-        raise ExtractionError("Extractor crashed while parsing this file") from None
+        reason = err.decode(errors="replace").strip().splitlines()[-1:] or ["no output"]
+        raise ExtractionError(f"Extractor crashed while parsing this file ({reason[0][:200]})") from None
     if not payload.get("ok"):
         raise UnsupportedFile(payload.get("error") or "Could not read this file")
     return payload["result"]

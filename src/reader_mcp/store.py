@@ -45,7 +45,6 @@ class Store:
     # ----------------------------------------------------------------- write
 
     async def ingest(self, incoming: Incoming) -> dict[str, Any]:
-        self.purge_expired()
         doc_id = incoming.sha256[:16]
         folder = self.docs / doc_id
         if self.has(doc_id):
@@ -56,6 +55,7 @@ class Store:
                 return {**existing, "already_ingested": True}
 
         folder.mkdir(mode=0o700, exist_ok=True)
+        os.utime(folder)  # a re-extraction of an old document must not look expired mid-way
         original = folder / "original"
         os.replace(incoming.path, original)
         try:
@@ -98,12 +98,12 @@ class Store:
         if self.settings.retention_hours > 0:
             cutoff = now - self.settings.retention_hours * 3600
             for folder in self.docs.iterdir():
-                if folder.is_dir() and folder.stat().st_mtime < cutoff:
+                if _older_than(folder, cutoff) and folder.is_dir():
                     shutil.rmtree(folder, ignore_errors=True)
                     self._pages.pop(folder.name, None)
         for folder, max_age in ((self.uploads, 2 * self.settings.upload_ttl), (self.tmp, 24 * 3600)):
             for file in folder.iterdir():
-                if file.stat().st_mtime < now - max_age:
+                if _older_than(file, now - max_age):
                     file.unlink(missing_ok=True)
 
     # ----------------------------------------------------------------- read
@@ -196,6 +196,13 @@ class Store:
             hits.append({"doc_id": did, "filename": filename, unit: n, "score": round(score, 3),
                          "snippet": ("…" if lo else "") + snippet + ("…" if lo + SNIPPET_CHARS < len(text) else "")})
         return sorted(hits, key=lambda h: h["score"], reverse=True)[:limit]
+
+
+def _older_than(path: Path, cutoff: float) -> bool:
+    try:
+        return path.stat().st_mtime < cutoff
+    except FileNotFoundError:  # removed by a concurrent ingest or upload meanwhile
+        return False
 
 
 def _write_json(path: Path, value: Any) -> None:

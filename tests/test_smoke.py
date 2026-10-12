@@ -8,6 +8,7 @@ Test the published package instead of the checkout with:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import os
@@ -188,6 +189,33 @@ async def test_stdio_end_to_end(workspace: dict[str, Path]) -> None:
         assert retried["filename"] == "long.txt" and retried["word_count"] == 20000
 
 
+def test_pdf_survives_bad_metadata_and_bad_pages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import pypdf
+    import pypdfium2
+
+    from reader_mcp.extractors import extract_pdf
+
+    pdf = tmp_path / "report.pdf"
+    pdf.write_bytes(make_pdf(["First page with enough text to count.", "Second page with enough text."], "T"))
+
+    def unreadable(*args: Any, **kwargs: Any) -> None:
+        raise ValueError("broken trailer")  # pypdf can't parse it, pdfium still can
+
+    original, calls = pypdfium2.PdfPage.get_textpage, []
+
+    def second_page_corrupt(page: Any) -> Any:
+        calls.append(1)
+        if len(calls) == 2:
+            raise RuntimeError("corrupt page")
+        return original(page)
+
+    monkeypatch.setattr(pypdf, "PdfReader", unreadable)
+    monkeypatch.setattr(pypdfium2.PdfPage, "get_textpage", second_page_corrupt)
+    result = extract_pdf(pdf, "report.pdf")
+    assert result["properties"] == {}
+    assert result["pages"][0].startswith("First page") and result["pages"][1] == ""
+
+
 def test_share_links_become_downloads() -> None:
     from reader_mcp.sources import direct_download_url
 
@@ -271,6 +299,36 @@ async def test_http_upload_flow(workspace: dict[str, Path]) -> None:
                 assert doc["type"] == "csv" and doc["source"] == "upload" and doc["row_count"] == 2
                 disabled = await call(client, "ingest_document", path=str(workspace["docs"] / "sales.csv"))
                 assert "disabled" in disabled["error"]
+                assert (await http.put(url, content=b"other file")).status_code == 409  # still single-use after ingest
+
+                uploads = workspace["data"] / "uploads"
+                pdf_bytes = (workspace["docs"] / "report.pdf").read_bytes()
+
+                # Simultaneous uploads to one link: exactly one wins, the file isn't corrupted.
+                upload = await call(client, "create_upload_url", filename="report.pdf")
+                url = upload["upload_url"].replace("http://localhost", "http://127.0.0.1")
+                payload = os.urandom(8 << 20)  # big enough that the requests really overlap
+                results = await asyncio.gather(*(http.put(url, content=payload) for _ in range(5)))
+                assert sorted(r.status_code for r in results) == [200, 409, 409, 409, 409]
+                assert (uploads / f"{upload['upload_id']}.bin").read_bytes() == payload
+
+                # A whole-file upload cut off by a server restart leaves a .part; retrying still works.
+                upload = await call(client, "create_upload_url", filename="report.pdf")
+                url = upload["upload_url"].replace("http://localhost", "http://127.0.0.1")
+                (uploads / f"{upload['upload_id']}.part").write_bytes(pdf_bytes[:50])
+                assert (await http.put(url, content=pdf_bytes)).status_code == 200
+
+                # An upload left waiting past the cleanup age gets a clear error, not a crash.
+                stale = await call(client, "create_upload_url", filename="old.pdf")
+                stale_url = stale["upload_url"].replace("http://localhost", "http://127.0.0.1")
+                assert (await http.put(stale_url, content=b"%PDF-1.4 stale")).status_code == 200
+                three_days_ago = time.time() - 3 * 24 * 3600
+                for leftover in uploads.glob(f"{stale['upload_id']}.*"):
+                    os.utime(leftover, (three_days_ago, three_days_ago))
+                docs_before = len(list((workspace["data"] / "docs").iterdir()))
+                expired = await call(client, "ingest_document", upload_id=stale["upload_id"])
+                assert "No completed upload" in expired["error"]
+                assert len(list((workspace["data"] / "docs").iterdir())) == docs_before
 
                 # Resumable upload in pieces, as the browser page does for large files on flaky networks.
                 data = (workspace["docs"] / "report.pdf").read_bytes()

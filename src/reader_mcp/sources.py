@@ -221,12 +221,15 @@ def read_upload(upload_id: str, settings: Settings) -> Incoming:
     folder = settings.data_dir / "uploads"
     blob, meta = folder / f"{upload_id}.bin", folder / f"{upload_id}.json"
     if not blob.exists():
-        raise SourceError("No completed upload with this id. Upload the file to the upload_url first.")
+        raise SourceError("No completed upload with this id. Upload the file first; "
+                          "uploads that wait too long before ingestion are cleaned up.")
     filename = json.loads(meta.read_text()).get("filename", "document") if meta.exists() else "document"
     digest = hashlib.sha256()
     with blob.open("rb") as data:
         for chunk in iter(lambda: data.read(CHUNK_BYTES), b""):
             digest.update(chunk)
+    # Mark the link as spent before the file moves away, so it can't accept a second upload.
+    (folder / f"{upload_id}.used").touch()
     meta.unlink(missing_ok=True)
     return Incoming(blob, filename, "upload", digest.hexdigest(), blob.stat().st_size)
 

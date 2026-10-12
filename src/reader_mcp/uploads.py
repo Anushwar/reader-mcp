@@ -93,32 +93,40 @@ async def handle_upload(request: Request, settings: Settings) -> Response:
 
     folder = settings.data_dir / "uploads"
     upload_id = claims["u"]
-    blob, partial, state = (folder / f"{upload_id}{ext}" for ext in (".bin", ".part", ".json"))
-    if claims.get("e", 0) < time.time() and not (partial.exists() or blob.exists()):  # expiry only blocks new uploads
+    blob, partial, state, used = (folder / f"{upload_id}{ext}" for ext in (".bin", ".part", ".json", ".used"))
+    done = lambda: blob.exists() or used.exists()  # noqa: E731  (.used: the upload was already ingested)
+    if claims.get("e", 0) < time.time() and not (partial.exists() or done()):  # expiry only blocks new uploads
         return _reply({"error": "Upload link has expired. Ask for a new one."}, 403)
 
     if request.method == "GET":
         if "status" in request.query_params:
             received = blob.stat().st_size if blob.exists() else partial.stat().st_size if partial.exists() else 0
-            return _reply({"received": received, "complete": blob.exists()})
+            return _reply({"received": received, "complete": done()})
         page = UPLOAD_PAGE.replace("{{filename}}", html.escape(claims["f"]))
         headers = {**SECURITY_HEADERS, "Content-Security-Policy":
                    "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'"}
         return HTMLResponse(page, headers=headers)
 
-    if blob.exists():
-        return _reply({"error": "This upload link was already used.", "complete": True}, 409)
-    content_range = request.headers.get("content-range")
     async with _locks.setdefault(upload_id, asyncio.Lock()):
-        if content_range:
-            return await _receive_piece(request, settings, claims, content_range, blob, partial, state)
-        return await _receive_whole(request, settings, claims, blob, partial, state)
+        # Checked under the lock: a request queued behind a finishing upload must see it as used.
+        if done():
+            response = _reply({"error": "This upload link was already used.", "complete": True}, 409)
+        elif request.headers.get("content-range"):
+            response = await _receive_piece(request, settings, claims, request.headers["content-range"],
+                                            blob, partial, state)
+        else:
+            response = await _receive_whole(request, settings, claims, blob, partial, state)
+    if done():
+        _locks.pop(upload_id, None)  # finished for good; any later request is refused by done()
+    return response
 
 
 async def _receive_whole(request: Request, settings: Settings, claims: dict[str, Any],
                          blob: Path, partial: Path, state: Path) -> Response:
     if partial.exists():
-        return _reply({"error": "A resumable upload is already in progress for this link."}, 409)
+        if state.exists():
+            return _reply({"error": "A resumable upload is already in progress for this link."}, 409)
+        partial.unlink()  # left over from an interrupted whole-file upload (e.g. a server restart): start over
     size = 0
     try:
         with partial.open("xb") as out:
@@ -127,10 +135,12 @@ async def _receive_whole(request: Request, settings: Settings, claims: dict[str,
                 if size > settings.max_file_bytes:
                     raise OverflowError
                 out.write(chunk)
-    except (OverflowError, ClientDisconnect) as exc:
+    except (OverflowError, ClientDisconnect, OSError) as exc:
         partial.unlink(missing_ok=True)
         if isinstance(exc, OverflowError):
             return _reply({"error": f"File exceeds {settings.max_file_bytes} bytes."}, 413)
+        if isinstance(exc, OSError):
+            return _reply({"error": "The server could not store the upload."}, 507)
         return _reply({"error": "Upload interrupted."}, 400)
     if size == 0:
         partial.unlink(missing_ok=True)
@@ -168,8 +178,10 @@ async def _receive_piece(request: Request, settings: Settings, claims: dict[str,
                 out.write(chunk)
         if written != expected:
             raise ValueError
-    except (ValueError, ClientDisconnect):
+    except (ValueError, ClientDisconnect, OSError) as exc:
         os.truncate(partial, received)  # drop the broken piece; the client resumes from `received`
+        if isinstance(exc, OSError):
+            return _reply({"error": "The server could not store the upload.", "received": received}, 507)
         return _reply({"error": "Piece did not match its Content-Range.", "received": received}, 400)
 
     received += written
@@ -182,7 +194,6 @@ async def _receive_piece(request: Request, settings: Settings, claims: dict[str,
 def _finish(claims: dict[str, Any], blob: Path, partial: Path, state: Path, size: int) -> Response:
     state.write_text(json.dumps({"filename": claims["f"]}))
     partial.replace(blob)
-    _locks.pop(claims["u"], None)
     return _reply({"status": "uploaded", "upload_id": claims["u"], "bytes": size,
                    "next_step": f"Call ingest_document(upload_id='{claims['u']}')."})
 
