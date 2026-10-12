@@ -127,6 +127,7 @@ async def test_stdio_end_to_end(workspace: dict[str, Path]) -> None:
         pdf = await call(client, "ingest_document", path=str(docs / "report.pdf"))
         assert pdf["type"] == "pdf" and pdf["unit_count"] == 2 and not pdf["needs_ocr"]
         assert pdf["properties"]["title"] == "Q3 Report"
+        assert len(pdf["doc_id"]) == 32 and pdf["sha256"].startswith(pdf["doc_id"])
         assert "Revenue grew" in pdf["preview"]
         again = await call(client, "ingest_document", path=str(docs / "report.pdf"))
         assert again["doc_id"] == pdf["doc_id"] and again["already_ingested"]
@@ -216,6 +217,66 @@ def test_pdf_survives_bad_metadata_and_bad_pages(tmp_path: Path, monkeypatch: py
     assert result["pages"][0].startswith("First page") and result["pages"][1] == ""
 
 
+def test_app_settings_folders_are_off_limits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from reader_mcp.config import Settings
+    from reader_mcp.sources import SourceError, read_path
+
+    home = tmp_path / "home"
+    for folder in ("Library/Application Support/Claude", "AppData/Roaming/gcloud", "work/repo"):
+        (home / folder).mkdir(parents=True)
+    (home / "Library/Application Support/Claude/claude_desktop_config.json").write_text('{"token": "secret"}')
+    (home / "AppData/Roaming/gcloud/credentials.json").write_text('{"key": "secret"}')
+    (home / "work/repo/notes.md").write_text("# Notes\nRepository docs stay readable.")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("READER_ALLOWED_ROOTS", raising=False)
+    monkeypatch.setenv("READER_DATA_DIR", str(tmp_path / "data"))
+    settings = Settings.from_env()  # default root: the home folder
+
+    assert read_path(str(home / "work/repo/notes.md"), settings).filename == "notes.md"
+    for secret in ("Library/Application Support/Claude/claude_desktop_config.json", "AppData/Roaming/gcloud/credentials.json"):
+        with pytest.raises(SourceError, match="app settings"):
+            read_path(str(home / secret), settings)
+    monkeypatch.setenv("READER_ALLOWED_ROOTS", str(home / "Library/Application Support/Claude"))
+    explicit = Settings.from_env()  # a root deliberately set inside Library is honored
+    assert read_path(str(home / "Library/Application Support/Claude/claude_desktop_config.json"), explicit).size > 0
+
+
+def test_ipv6_forms_that_wrap_private_ipv4_are_blocked() -> None:
+    from ipaddress import ip_address
+
+    from reader_mcp.sources import _is_public
+
+    blocked = ["64:ff9b::7f00:1", "64:ff9b:1::a00:1", "2002:7f00:1::", "::127.0.0.1", "::ffff:0:7f00:1",
+               "::ffff:127.0.0.1", "fec0::1", "2001:0:4136:e378:8000:63bf:80ff:fffe"]
+    allowed = ["93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946", "64:ff9b::5db8:d822", "2002:5db8:d822::"]
+    assert not any(_is_public(ip_address(a)) for a in blocked)
+    assert all(_is_public(ip_address(a)) for a in allowed)
+
+
+def test_extracted_text_is_capped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from reader_mcp import extractors
+
+    monkeypatch.setattr(extractors, "MAX_TEXT_FILE_BYTES", 10_000)
+    monkeypatch.setattr(extractors, "MAX_TEXT_CHARS", 8_000)
+    big = tmp_path / "big.txt"
+    big.write_text("a line of text that repeats\n" * 5000)  # ~140 KB
+    result = extractors.extract(big, "big.txt")
+    assert result["extra"]["truncated"] is True
+    assert sum(map(len, result["pages"])) <= 8_000
+
+
+def test_warns_when_exposed_without_auth(workspace: dict[str, Path]) -> None:
+    port = _free_port()
+    proc = subprocess.Popen([*SERVER_CMD, "--http", "--port", str(port)], stdout=subprocess.DEVNULL,
+                            stderr=subprocess.PIPE, env=server_env(workspace, READER_PUBLIC_URL="https://reader.example.com"))
+    try:
+        time.sleep(2)
+    finally:
+        proc.terminate()
+        _, err = proc.communicate(timeout=10)
+    assert b"WARNING: reachable beyond this machine without READER_AUTH_TOKEN" in err
+
+
 def test_share_links_become_downloads() -> None:
     from reader_mcp.sources import direct_download_url
 
@@ -291,6 +352,7 @@ async def test_http_upload_flow(workspace: dict[str, Path]) -> None:
                 url = upload["upload_url"].replace("http://localhost", "http://127.0.0.1")
                 assert (await http.get(url)).status_code == 200  # browser upload page
                 assert (await http.put(url + "x", content=b"a,b\n1,2\n")).status_code == 403  # tampered
+                assert (await http.get(f"{base}/upload/abc.%C3%A9")).status_code == 403  # non-ASCII, not a crash
                 put = await http.put(url, content=(workspace["docs"] / "sales.csv").read_bytes())
                 assert put.status_code == 200 and put.json()["upload_id"] == upload["upload_id"]
                 assert (await http.put(url, content=b"again")).status_code == 409  # single use

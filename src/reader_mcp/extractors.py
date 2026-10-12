@@ -23,6 +23,10 @@ from typing import Any, Callable
 
 EXTRACTOR_VERSION = 4  # bump when extraction output changes so stored documents get re-extracted
 CHUNK_CHARS = 4000  # size of a "section" for formats without real pages
+# Bounds on extracted text, so one huge file can't exhaust memory: ~10,000 pages, far more than
+# any agent will read, while the original file itself may still be up to READER_MAX_FILE_MB.
+MAX_TEXT_CHARS = 20_000_000
+MAX_TEXT_FILE_BYTES = 32 * 1024 * 1024
 CSV_ROWS_PER_UNIT = 200
 MAX_UNZIPPED_BYTES = 300 * 1024 * 1024  # zip-bomb guard for .docx
 OCR_MIN_CHARS_PER_PAGE = 25
@@ -55,6 +59,21 @@ def _decode(data: bytes) -> tuple[str, str]:
         return data.decode("utf-8-sig"), "utf-8"
     except UnicodeDecodeError:
         return data.decode("latin-1"), "latin-1"
+
+
+def _read_text_file(path: Path) -> tuple[bytes, bool]:
+    """Read at most MAX_TEXT_FILE_BYTES, cut at a line break so no character is split."""
+    with path.open("rb") as file:
+        data = file.read(MAX_TEXT_FILE_BYTES + 1)
+    if len(data) <= MAX_TEXT_FILE_BYTES:
+        return data, False
+    data = data[:MAX_TEXT_FILE_BYTES]
+    return data[: data.rfind(b"\n") + 1] or data, True
+
+
+def _truncation_note(truncated: bool) -> dict[str, Any]:
+    return {"truncated": True, "truncated_note": "Text extraction stopped at the size limit; later content "
+            "isn't searchable."} if truncated else {}
 
 
 def _chunk(text: str, size: int = CHUNK_CHARS) -> list[str]:
@@ -145,17 +164,24 @@ def extract_pdf(path: Path, filename: str) -> dict[str, Any]:
     import pypdfium2 as pdfium
 
     properties = _pdf_properties(path)
-    pages = []
+    pages: list[str] = []
+    used, extracted = 0, 0
     document = pdfium.PdfDocument(path)  # Chrome's PDF engine: ~25x faster than pure-Python parsing
     try:
         for index in range(len(document)):
-            pages.append(_pdfium_page_text(document, index))
+            if used >= MAX_TEXT_CHARS:
+                pages.append("")  # keep page numbering, skip the work
+                continue
+            text = _pdfium_page_text(document, index)[: MAX_TEXT_CHARS - used]
+            pages.append(text)
+            used += len(text)
+            extracted += 1
     finally:
         document.close()
 
-    empty = [i + 1 for i, text in enumerate(pages) if len(text) < OCR_MIN_CHARS_PER_PAGE]
+    empty = [i + 1 for i, text in enumerate(pages[:extracted]) if len(text) < OCR_MIN_CHARS_PER_PAGE]
     needs_ocr = bool(pages) and len(empty) == len(pages)
-    extra: dict[str, Any] = {}
+    extra: dict[str, Any] = _truncation_note(extracted < len(pages) or used >= MAX_TEXT_CHARS)
     if empty and not needs_ocr:
         extra["pages_without_text"] = empty[:50]
     return {
@@ -209,13 +235,14 @@ def extract_docx(path: Path, filename: str) -> dict[str, Any]:
         "created": _iso(core.created),
         "modified": _iso(core.modified),
     }
+    text = "\n\n".join(blocks)
     return {
         "unit": "section",
-        "pages": _chunk("\n\n".join(blocks)),
+        "pages": _chunk(text[:MAX_TEXT_CHARS]),
         "properties": _clean(props),
         "needs_ocr": False,
         "ocr_reason": None,
-        "extra": _clean({"headings": headings[:100], "table_count": tables}),
+        "extra": _clean({"headings": headings[:100], "table_count": tables}) | _truncation_note(len(text) > MAX_TEXT_CHARS),
     }
 
 
@@ -240,7 +267,8 @@ def _column_type(values: list[str]) -> str:
 
 
 def extract_table(path: Path, filename: str) -> dict[str, Any]:
-    text, encoding = _decode(path.read_bytes())
+    data, truncated = _read_text_file(path)
+    text, encoding = _decode(data)
     csv.field_size_limit(10 * 1024 * 1024)
     if filename.lower().endswith(".tsv"):
         delimiter = "\t"
@@ -276,18 +304,20 @@ def extract_table(path: Path, filename: str) -> dict[str, Any]:
         "needs_ocr": False,
         "ocr_reason": None,
         "extra": {"row_count": len(body), "column_count": len(header), "columns": columns,
-                  "delimiter": delimiter, "encoding": encoding, "rows_per_unit": CSV_ROWS_PER_UNIT},
+                  "delimiter": delimiter, "encoding": encoding, "rows_per_unit": CSV_ROWS_PER_UNIT}
+                 | _truncation_note(truncated),
     }
 
 
 def extract_text(path: Path, filename: str) -> dict[str, Any]:
-    text, encoding = _decode(path.read_bytes())
+    data, truncated = _read_text_file(path)
+    text, encoding = _decode(data)
     props: dict[str, Any] = {}
-    extra: dict[str, Any] = {"encoding": encoding, "line_count": text.count("\n") + 1}
+    extra: dict[str, Any] = {"encoding": encoding, "line_count": text.count("\n") + 1} | _truncation_note(truncated)
     if filename.lower().endswith((".md", ".markdown")):
         title = next((ln[2:].strip() for ln in text.splitlines() if ln.startswith("# ")), None)
         props = _clean({"title": title})
-    if filename.lower().endswith(".json"):
+    if filename.lower().endswith(".json") and not truncated:
         try:
             json.loads(text)
             extra["valid_json"] = True
@@ -338,7 +368,14 @@ def detect_type(path: Path, filename: str) -> str:
 def extract(path: Path, filename: str) -> dict[str, Any]:
     kind = detect_type(path, filename)
     result = EXTRACTORS[kind](path, filename)
-    result["pages"] = [normalize_text(page) for page in result["pages"]]
+    pages, used = [], 0
+    for page in result["pages"]:  # final safety net on total text, whatever the format
+        page = normalize_text(page)[: MAX_TEXT_CHARS - used]
+        pages.append(page)
+        used += len(page)
+    if used >= MAX_TEXT_CHARS:
+        result["extra"] |= _truncation_note(True)
+    result["pages"] = pages
     if kind == "text":
         ext = Path(filename).suffix.lower().lstrip(".")
         kind = {"markdown": "md"}.get(ext, ext) if ext in ("md", "markdown", "json") else "txt"

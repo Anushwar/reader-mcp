@@ -79,7 +79,7 @@ def verify_token(settings: Settings, token: str) -> dict[str, Any] | None:
     try:
         payload, signature = token.split(".", 1)
         expected = _b64(hmac.new(settings.upload_secret, payload.encode(), hashlib.sha256).digest())
-        if not hmac.compare_digest(signature, expected):
+        if not hmac.compare_digest(signature.encode(), expected.encode()):  # bytes: non-ASCII input can't crash it
             return None
         return json.loads(_unb64(payload))
     except (ValueError, json.JSONDecodeError):
@@ -107,6 +107,8 @@ async def handle_upload(request: Request, settings: Settings) -> Response:
                    "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'"}
         return HTMLResponse(page, headers=headers)
 
+    if len(_locks) > 64:
+        _prune_locks(folder)
     async with _locks.setdefault(upload_id, asyncio.Lock()):
         # Checked under the lock: a request queued behind a finishing upload must see it as used.
         if done():
@@ -119,6 +121,14 @@ async def handle_upload(request: Request, settings: Settings) -> Response:
     if done():
         _locks.pop(upload_id, None)  # finished for good; any later request is refused by done()
     return response
+
+
+def _prune_locks(folder: Path) -> None:
+    """Drop locks of abandoned uploads (no files left after cleanup). Runs on the event loop,
+    so no request can be between taking a lock from the map and acquiring it."""
+    for upload_id, lock in list(_locks.items()):
+        if not lock.locked() and not any(folder.glob(f"{upload_id}.*")):
+            del _locks[upload_id]
 
 
 async def _receive_whole(request: Request, settings: Settings, claims: dict[str, Any],

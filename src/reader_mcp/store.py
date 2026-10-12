@@ -21,11 +21,12 @@ from .config import Settings
 from .extractors import EXTRACTOR_VERSION, extract_isolated, normalize_text
 from .sources import Incoming
 
-DOC_ID = re.compile(r"^[a-f0-9]{16}$")
+DOC_ID = re.compile(r"^[a-f0-9]{32}$")  # first 128 bits of the SHA-256: collisions aren't practical
 WORD = re.compile(r"\w+", re.UNICODE)
 PREVIEW_CHARS = 600
 SNIPPET_CHARS = 280
 CACHED_DOCS = 16
+CACHED_CHARS = 60_000_000  # the page cache is bounded by size as well as count
 
 
 class NotFound(LookupError):
@@ -45,11 +46,11 @@ class Store:
     # ----------------------------------------------------------------- write
 
     async def ingest(self, incoming: Incoming) -> dict[str, Any]:
-        doc_id = incoming.sha256[:16]
+        doc_id = incoming.sha256[:32]
         folder = self.docs / doc_id
         if self.has(doc_id):
             existing = self.metadata(doc_id)
-            if existing.get("extractor_version") == EXTRACTOR_VERSION:
+            if existing.get("extractor_version") == EXTRACTOR_VERSION and existing.get("sha256") == incoming.sha256:
                 incoming.path.unlink(missing_ok=True)
                 os.utime(folder)  # restart the retention clock
                 return {**existing, "already_ingested": True}
@@ -65,7 +66,7 @@ class Store:
             raise
 
         pages: list[str] = result["pages"]
-        full_text = "\n".join(pages)
+        preview = "\n".join(pages[:5])[:PREVIEW_CHARS]
         metadata = {
             "doc_id": doc_id,
             "filename": incoming.filename,
@@ -75,8 +76,8 @@ class Store:
             "sha256": incoming.sha256,
             "unit": result["unit"],
             "unit_count": len(pages),
-            "char_count": len(full_text),
-            "word_count": len(WORD.findall(full_text)),
+            "char_count": sum(map(len, pages)),
+            "word_count": sum(sum(1 for _ in WORD.finditer(page)) for page in pages),  # no giant word list
             "properties": result["properties"],
             "needs_ocr": result["needs_ocr"],
             **({"ocr_reason": result["ocr_reason"]} if result["ocr_reason"] else {}),
@@ -86,7 +87,7 @@ class Store:
         }
         _write_json(folder / "pages.json", pages)
         _write_json(folder / "meta.json", metadata)  # written last: its presence marks the document as ready
-        return {**metadata, "preview": full_text[:PREVIEW_CHARS]}
+        return {**metadata, "preview": preview}
 
     def delete(self, doc_id: str) -> None:
         shutil.rmtree(self._folder(doc_id))
@@ -128,7 +129,8 @@ class Store:
             return cached[1]
         pages = json.loads(path.read_text())
         self._pages[doc_id] = (stamp, pages)
-        if len(self._pages) > CACHED_DOCS:
+        size = lambda: sum(sum(map(len, p)) for _, p in self._pages.values())  # noqa: E731
+        while len(self._pages) > 1 and (len(self._pages) > CACHED_DOCS or size() > CACHED_CHARS):
             self._pages.popitem(last=False)
         return pages
 

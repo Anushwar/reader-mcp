@@ -16,6 +16,7 @@ from .config import Settings
 from .server import build_server
 
 HOSTED_CLIENT_ORIGINS = ["https://chatgpt.com", "https://claude.ai"]
+LOCAL = ("127.0.0.1", "localhost", "::1")
 
 
 class BearerAuth:
@@ -39,7 +40,7 @@ def _transport_security(settings: Settings) -> TransportSecuritySettings:
     hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
     origins = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*", *HOSTED_CLIENT_ORIGINS]
     public = urlsplit(settings.public_url)
-    if public.hostname not in ("localhost", "127.0.0.1", "::1"):
+    if public.hostname not in LOCAL:
         hosts += [public.netloc, f"{public.hostname}:*"]
         origins.append(f"{public.scheme}://{public.netloc}")
     return TransportSecuritySettings(enable_dns_rebinding_protection=True, allowed_hosts=hosts, allowed_origins=origins)
@@ -67,8 +68,10 @@ def main(argv: list[str] | None = None) -> None:
     )
     if settings.auth_token:
         app = BearerAuth(app, settings.auth_token)
-    elif args.host not in ("127.0.0.1", "localhost", "::1"):
-        print("reader: listening beyond localhost without READER_AUTH_TOKEN.", file=sys.stderr)
+    elif args.host not in LOCAL or urlsplit(settings.public_url).hostname not in LOCAL:
+        print("reader: WARNING: reachable beyond this machine without READER_AUTH_TOKEN. Anyone who can reach "
+              "/mcp can list, read and delete documents. Set READER_AUTH_TOKEN unless that is intended.",
+              file=sys.stderr)
     print(f"reader: MCP endpoint http://{args.host}:{args.port}/mcp  (public: {settings.public_url}/mcp)", file=sys.stderr)
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 

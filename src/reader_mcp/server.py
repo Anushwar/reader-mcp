@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import threading
+import time
 from collections import OrderedDict
 from typing import Annotated, Any
 
@@ -53,12 +56,31 @@ class OpenAIFile(BaseModel):
 READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=False)
 IMMUTABLE_SOURCES = ("upload:", "file:")
 FINISHED_KEPT = 1000
+MAX_CONCURRENT_INGESTS = 4
+PURGE_EVERY_SECONDS = 600
+
+
+def _source_key(kind: str, value: str) -> str:
+    """Fixed-size key per source, however long the URL or file id is."""
+    return f"{kind}:{hashlib.sha256(value.encode()).hexdigest()}"
+
+
+def _purge_periodically(store: Store) -> None:
+    """Enforce retention even on an idle server (ingests also purge on their own)."""
+    while True:
+        time.sleep(PURGE_EVERY_SECONDS)
+        try:
+            store.purge_expired()
+        except OSError:
+            pass  # a transient filesystem error shouldn't stop future purges
 
 
 def build_server(settings: Settings, *, http: bool = False) -> MCPServer:
     store = Store(settings)
     store.purge_expired()
+    threading.Thread(target=_purge_periodically, args=(store,), name="reader-purge", daemon=True).start()
     mcp = MCPServer("reader", instructions=INSTRUCTIONS, version=__version__)
+    ingest_slots = asyncio.Semaphore(MAX_CONCURRENT_INGESTS)  # bounds parallel downloads and disk use
 
     def fail(exc: Exception) -> ToolError:
         return ToolError(str(exc))
@@ -76,9 +98,10 @@ def build_server(settings: Settings, *, http: bool = False) -> MCPServer:
             task.exception()  # mark a failure as seen when nobody is awaiting the job anymore
 
     async def run_ingest(key: str | None, obtain: Any) -> dict[str, Any]:
-        await asyncio.to_thread(store.purge_expired)  # before obtaining, so it can't delete the file we're about to use
-        incoming: Incoming = await obtain()
-        result = await store.ingest(incoming)
+        async with ingest_slots:
+            await asyncio.to_thread(store.purge_expired)  # before obtaining, so it can't delete the file we use
+            incoming: Incoming = await obtain()
+            result = await store.ingest(incoming)
         if key and key.startswith(IMMUTABLE_SOURCES):
             finished[key] = result["doc_id"]
             while len(finished) > FINISHED_KEPT:
@@ -111,15 +134,15 @@ def build_server(settings: Settings, *, http: bool = False) -> MCPServer:
             raise ToolError("Provide exactly one of: path, url, file, upload_id, content_base64.")
 
         if path:
-            key, obtain = f"path:{path}", lambda: asyncio.to_thread(read_path, path, settings)
+            key, obtain = _source_key("path", path), lambda: asyncio.to_thread(read_path, path, settings)
         elif url:
-            key, obtain = f"url:{url}", lambda: fetch_url(url, settings, filename)
+            key, obtain = _source_key("url", url), lambda: fetch_url(url, settings, filename)
         elif file:
             # ChatGPT's download_url is short-lived; file_id is the stable identity.
-            key, obtain = f"file:{file.file_id}", lambda: fetch_url(
+            key, obtain = _source_key("file", file.file_id), lambda: fetch_url(
                 file.download_url, settings, file.file_name or filename, source="chatgpt_file")
         elif upload_id:
-            key, obtain = f"upload:{upload_id}", lambda: asyncio.to_thread(read_upload, upload_id, settings)
+            key, obtain = _source_key("upload", upload_id), lambda: asyncio.to_thread(read_upload, upload_id, settings)
         else:
             key, obtain = None, lambda: asyncio.to_thread(decode_base64, content_base64 or "", filename, settings)
 
