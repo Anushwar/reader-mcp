@@ -35,7 +35,7 @@ class BearerAuth:
 
 
 def _transport_security(settings: Settings) -> TransportSecuritySettings:
-    """Keep DNS-rebinding protection on, but accept the public (tunnel) hostname too."""
+    """Keep DNS-rebinding protection on, but accept the public hostname too."""
     hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
     origins = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*", *HOSTED_CLIENT_ORIGINS]
     public = urlsplit(settings.public_url)

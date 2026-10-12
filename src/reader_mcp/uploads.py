@@ -31,7 +31,7 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 from .config import Settings
 from .sources import safe_filename
 
-MAX_PIECE_BYTES = 64 * 1024 * 1024  # stays under the ~100 MB per-request cap of common tunnels/proxies
+MAX_PIECE_BYTES = 64 * 1024 * 1024  # stays under the ~100 MB per-request cap of common proxies
 CONTENT_RANGE = re.compile(r"bytes (\d+)-(\d+)/(\d+)")
 SECURITY_HEADERS = {
     "Referrer-Policy": "no-referrer",  # the URL itself is the credential
