@@ -62,7 +62,8 @@ def main(argv: list[str] | None = None) -> None:
     import uvicorn
 
     app: ASGIApp = server.streamable_http_app(
-        stateless_http=True, transport_security=_transport_security(settings), host=args.host
+        stateless_http=True, transport_security=_transport_security(settings), host=args.host,
+        max_request_body_size=16 * 1024 * 1024,  # room for base64 files up to the 10 MB cap
     )
     if settings.auth_token:
         app = BearerAuth(app, settings.auth_token)

@@ -61,11 +61,11 @@ class Settings:
         return cls(
             data_dir=Path(_env("DATA_DIR") or Path.home() / ".reader-mcp").expanduser().resolve(),
             allowed_roots=roots,
-            max_file_bytes=int(_number("MAX_FILE_MB", 200) * 1024 * 1024),
-            extract_timeout=_number("EXTRACT_TIMEOUT", 120),
+            max_file_bytes=int(_number("MAX_FILE_MB", 2048) * 1024 * 1024),
+            extract_timeout=_number("EXTRACT_TIMEOUT", 600),
             retention_hours=_number("RETENTION_HOURS", 24),
             public_url=public_url,
             upload_secret=(secret or secrets.token_hex(32)).encode(),
-            upload_ttl=int(_number("UPLOAD_TTL", 600)),
+            upload_ttl=int(_number("UPLOAD_TTL", 3600)),
             auth_token=_env("AUTH_TOKEN"),
         )

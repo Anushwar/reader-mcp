@@ -91,12 +91,12 @@ All settings are optional environment variables (see [`.env.example`](.env.examp
 | --- | --- | --- |
 | `READER_DATA_DIR` | `~/.reader-mcp` | Where documents and extracted text are stored |
 | `READER_ALLOWED_ROOTS` | home folder (stdio), none (HTTP) | Folders `path` may read; hidden files are always refused |
-| `READER_MAX_FILE_MB` | `200` | Largest accepted file |
+| `READER_MAX_FILE_MB` | `2048` | Largest accepted file |
 | `READER_RETENTION_HOURS` | `24` | Auto-delete age (`0` keeps documents forever) |
-| `READER_EXTRACT_TIMEOUT` | `120` | Seconds before an extraction is stopped |
+| `READER_EXTRACT_TIMEOUT` | `600` | Seconds before an extraction is stopped |
 | `READER_PUBLIC_URL` | `http://localhost:<port>` | Base URL clients use to reach the server, for upload links |
 | `READER_UPLOAD_SECRET` | random per run | Signs upload links; set it so links survive restarts |
-| `READER_UPLOAD_TTL` | `600` | Seconds an upload link stays valid |
+| `READER_UPLOAD_TTL` | `3600` | Seconds an upload link stays valid |
 | `READER_AUTH_TOKEN` | unset | Requires `Authorization: Bearer <token>` on `/mcp` |
 
 ## Evaluation
