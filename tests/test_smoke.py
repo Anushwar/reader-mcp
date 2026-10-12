@@ -243,6 +243,26 @@ async def test_http_upload_flow(workspace: dict[str, Path]) -> None:
                 assert doc["type"] == "csv" and doc["source"] == "upload" and doc["row_count"] == 2
                 disabled = await call(client, "ingest_document", path=str(workspace["docs"] / "sales.csv"))
                 assert "disabled" in disabled["error"]
+
+                # Resumable upload in pieces, as the browser page does for large files on flaky networks.
+                data = (workspace["docs"] / "report.pdf").read_bytes()
+                upload = await call(client, "create_upload_url", filename="report.pdf")
+                url = upload["upload_url"].replace("http://localhost", "http://127.0.0.1")
+                piece = lambda start, end: http.put(  # noqa: E731
+                    url, content=data[start:end], headers={"Content-Range": f"bytes {start}-{end - 1}/{len(data)}"})
+                half = len(data) // 2
+                assert (await piece(0, half)).json()["received"] == half
+                skipped = await piece(half + 10, len(data))  # out of order: server says where to resume
+                assert skipped.status_code == 409 and skipped.json()["received"] == half
+                broken = await http.put(url, content=data[half:half + 5],  # shorter than its Content-Range
+                                        headers={"Content-Range": f"bytes {half}-{len(data) - 1}/{len(data)}"})
+                assert broken.status_code == 400 and broken.json()["received"] == half
+                assert (await http.get(url, params={"status": 1})).json() == {"received": half, "complete": False}
+                done = await piece(half, len(data))
+                assert done.status_code == 200 and done.json()["bytes"] == len(data)
+                assert (await http.get(url, params={"status": 1})).json()["complete"] is True
+                pieced = await call(client, "ingest_document", upload_id=upload["upload_id"])
+                assert pieced["type"] == "pdf" and pieced["unit_count"] == 2
             await auth.aclose()
     finally:
         proc.terminate()

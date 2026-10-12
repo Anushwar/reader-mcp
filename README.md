@@ -84,7 +84,7 @@ Add `https://<your-tunnel-host>/mcp` as a connector: Developer mode in ChatGPT, 
 - **ChatGPT** attaches the file. reader declares `openai/fileParams`, so ChatGPT passes a temporary download link and the server fetches the file itself.
 - **Claude.ai** can't hand files to connectors. The model calls `create_upload_url` and uploads the file from its code sandbox with `curl`. Allow your tunnel's domain under *Settings → Capabilities → Code execution*, or open the link in a browser and upload by hand.
 
-**Files bigger than the chat allows:** ask the assistant for an upload link (`create_upload_url`) and upload in the browser. The file goes straight to reader without passing through the chat, so only `READER_MAX_FILE_MB` applies.
+**Files bigger than the chat allows:** ask the assistant for an upload link (`create_upload_url`) and upload in the browser. The file goes straight to reader without passing through the chat, so only `READER_MAX_FILE_MB` applies. The page uploads in resumable 8 MB pieces, so a phone holds one piece in memory at a time, and a dropped connection resumes where it stopped.
 
 A tunnel exposes the server publicly, so only keep it running while you're testing. For clients that can send headers, set `READER_AUTH_TOKEN`.
 
@@ -95,7 +95,7 @@ A tunnel exposes the server publicly, so only keep it running while you're testi
 | `path` | The server runs on the same machine as the files (stdio). Limited to `READER_ALLOWED_ROOTS`. | local |
 | `url` | An HTTPS link to a document, e.g. a presigned S3 URL. Google Drive, Google Docs and Dropbox share links are converted automatically; web pages and private addresses are refused. | server pulls |
 | `file` | ChatGPT file attachments (`openai/fileParams`). | server pulls |
-| `upload_id` | The file is somewhere the server can't reach (an agent sandbox, a laptop). Get a signed link from `create_upload_url`, then `PUT` the bytes. | client pushes |
+| `upload_id` | The file is somewhere the server can't reach (an agent sandbox, a phone, a laptop). Get a signed link from `create_upload_url`, then `PUT` the bytes, either whole or in resumable pieces (`Content-Range`). | client pushes |
 | `content_base64` | Small files only. Base64 adds ~33% and travels through the model's context. | inline |
 
 ## Tools
