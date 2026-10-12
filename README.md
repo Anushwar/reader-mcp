@@ -14,17 +14,25 @@ reader extracts a document once, then lets the model search and page through it 
 - **Large files:** downloads and uploads stream to disk, uploads are resumable, and an ingest that outlives the client's timeout finishes in the background.
 - **Secure by default:** isolated parsers with timeouts, allowlisted local paths, SSRF-protected HTTPS fetches, signed single-use upload links, optional bearer auth and automatic retention.
 
-## Quickstart
+## Setup
 
-Requires [uv](https://docs.astral.sh/uv/getting-started/installation/).
+Requires [uv](https://docs.astral.sh/uv/getting-started/installation/). No other configuration is needed.
 
-**Claude Code**
+**Option 1: run straight from GitHub**
 
 ```bash
 claude mcp add reader -- uvx --from git+https://github.com/Anushwar/reader-mcp reader
 ```
 
-**Claude Desktop, Cursor and other MCP clients**
+**Option 2: run from a clone**
+
+```bash
+git clone https://github.com/Anushwar/reader-mcp && cd reader-mcp
+uv sync
+claude mcp add reader -- uv --directory "$PWD" run reader
+```
+
+For Claude Desktop, Cursor and other MCP clients, add the same command to the client's MCP config:
 
 ```json
 {
@@ -37,9 +45,20 @@ claude mcp add reader -- uvx --from git+https://github.com/Anushwar/reader-mcp r
 }
 ```
 
-Then ask: *"Use reader to ingest ~/Downloads/report.pdf and summarize the risks section."*
+From a clone, use `"command": "uv", "args": ["--directory", "/path/to/reader-mcp", "run", "reader"]`.
 
-## Use it from your own agent
+**Check it's connected:** run `claude mcp list` (or `/mcp` inside Claude Code). `reader` should show as connected.
+
+## Usage
+
+Talk to your agent as usual and mention reader. A typical session ingests a document once, searches it, then reads the relevant pages:
+
+- *"Use reader to ingest ~/Downloads/report.pdf and summarize the risks section."*
+- *"Ingest https://arxiv.org/pdf/1706.03762 with reader and explain how multi-head attention works, citing pages."*
+- *"Search my reader documents for 'termination clause' and read the surrounding pages."*
+- *"What metadata does reader have for that PDF? Does it need OCR?"*
+
+### From your own agent
 
 ```python
 import asyncio
@@ -59,7 +78,16 @@ asyncio.run(main())
 
 For reliable agents, call `ingest_document` from your own code when a file arrives and give the model the `doc_id`.
 
-**HTTP mode:** `reader --http` serves Streamable HTTP at `http://127.0.0.1:8000/mcp` and adds `create_upload_url`, for clients that don't share a disk with the server.
+### HTTP mode
+
+For clients that don't share a disk with the server, run it over Streamable HTTP:
+
+```bash
+READER_AUTH_TOKEN=choose-a-token uvx --from git+https://github.com/Anushwar/reader-mcp reader --http
+# MCP endpoint: http://127.0.0.1:8000/mcp  (send "Authorization: Bearer choose-a-token")
+```
+
+Files then arrive by `url`, or by upload. Ask the agent for an upload link (`create_upload_url`), open it in a browser (or `curl -T file.pdf "<link>"`), and the agent ingests it with the returned `upload_id`. Browser uploads go in resumable pieces, so an interrupted upload continues where it stopped.
 
 ## How files get in
 
@@ -95,7 +123,7 @@ All settings are optional environment variables (see [`.env.example`](.env.examp
 | `READER_RETENTION_HOURS` | `24` | Auto-delete age (`0` keeps documents forever) |
 | `READER_EXTRACT_TIMEOUT` | `600` | Seconds before an extraction is stopped |
 | `READER_PUBLIC_URL` | `http://localhost:<port>` | Base URL clients use to reach the server, for upload links |
-| `READER_UPLOAD_SECRET` | random per run | Signs upload links; set it so links survive restarts |
+| `READER_UPLOAD_SECRET` | generated once, kept in the data dir | Key that signs upload links; override to share or rotate it |
 | `READER_UPLOAD_TTL` | `3600` | Seconds an upload link stays valid |
 | `READER_AUTH_TOKEN` | unset | Requires `Authorization: Bearer <token>` on `/mcp` |
 
@@ -122,13 +150,7 @@ uv run python eval/agents.py book.pdf --shuffle         # headless Claude Code c
 
 ## Development
 
-```bash
-git clone https://github.com/Anushwar/reader-mcp && cd reader-mcp
-uv sync
-uv run pytest
-```
-
-The tests start the real server over stdio and HTTP and generate their own fixtures. To test the published build instead, set `MCP_CMD="uvx --from git+https://github.com/Anushwar/reader-mcp reader"`.
+From a clone, run `uv run pytest`. The tests start the real server over stdio and HTTP and generate their own fixtures. To test the published build instead, set `MCP_CMD="uvx --from git+https://github.com/Anushwar/reader-mcp reader"`.
 
 ## License
 

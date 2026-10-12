@@ -89,7 +89,7 @@ def verify_token(settings: Settings, token: str) -> dict[str, Any] | None:
 async def handle_upload(request: Request, settings: Settings) -> Response:
     claims = verify_token(settings, request.path_params["token"])
     if claims is None:
-        return _reply({"error": "Upload link is invalid."}, 403)
+        return _reply({"error": "This upload link is not valid. Ask for a new one."}, 403)
 
     folder = settings.data_dir / "uploads"
     upload_id = claims["u"]
@@ -213,9 +213,14 @@ UPLOAD_PAGE = """<!doctype html>
   const target = location.pathname;
   const pause = (ms) => new Promise((done) => setTimeout(done, ms));
 
+  // The link itself is unusable (invalid, expired, file too large): retrying won't help.
+  class LinkError extends Error {}
+
   async function received() {
     const res = await fetch(target + "?status=1");
-    return (await res.json()).received || 0;
+    const body = await res.json();
+    if (!res.ok) throw new LinkError(body.error || res.statusText);
+    return body.received || 0;
   }
 
   async function sendPiece(file, start) {
@@ -226,7 +231,10 @@ UPLOAD_PAGE = """<!doctype html>
         res = await fetch(target, { method: "PUT", body: file.slice(start, end),
           headers: { "Content-Range": `bytes ${start}-${end - 1}/${file.size}` } });
         body = await res.json();
-      } catch (error) {  // network drop: back off and retry this piece
+      } catch (error) {
+        // A server that rejects a piece early can look like a dropped connection, so ask
+        // whether the link still works before treating this as a network blip.
+        try { await received(); } catch (check) { if (check instanceof LinkError) throw check; }
         if (attempt >= 5) throw new Error("Connection keeps dropping. Tap Upload again to resume.");
         await pause(1000 * 2 ** attempt);
         continue;
@@ -235,7 +243,7 @@ UPLOAD_PAGE = """<!doctype html>
       if (body.complete) return file.size;
       if (res.status === 409 && body.received !== undefined) return body.received;  // resume where the server is
       if (res.status === 400 && body.received !== undefined && attempt < 5) { await pause(1000); continue; }
-      throw new Error(body.error || res.statusText);  // permanent: expired link, file too large, ...
+      throw new LinkError(body.error || res.statusText);  // permanent: expired link, file too large, ...
     }
   }
 
@@ -256,7 +264,10 @@ UPLOAD_PAGE = """<!doctype html>
     try {
       await upload(file, (done) => { bar.value = done; status.textContent = `Uploading… ${Math.floor(done * 100)}%`; });
       status.className = "ok"; status.textContent = "Uploaded. Go back to your chat and say it's done.";
-    } catch (error) { status.className = "err"; status.textContent = "Upload paused: " + error.message; }
+    } catch (error) {
+      status.className = "err";
+      status.textContent = error instanceof LinkError ? error.message : "Upload paused: " + error.message;
+    }
   };
 </script></body></html>
 """

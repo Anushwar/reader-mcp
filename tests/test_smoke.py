@@ -208,21 +208,49 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+def _start_http(port: int, env: dict[str, str]) -> subprocess.Popen[bytes]:
+    proc = subprocess.Popen([*SERVER_CMD, "--http", "--port", str(port)], env=env,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for _ in range(100):
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+            break
+        except OSError:
+            time.sleep(0.1)
+    return proc
+
+
+@pytest.mark.anyio
+async def test_upload_links_survive_restart(workspace: dict[str, Path]) -> None:
+    """Without READER_UPLOAD_SECRET, the signing key is generated once and kept in the data dir."""
+    port, env = _free_port(), server_env(workspace)
+    proc = _start_http(port, env)
+    try:
+        async with Client(f"http://127.0.0.1:{port}/mcp") as client:
+            upload = await call(client, "create_upload_url", filename="report.pdf")
+        url = upload["upload_url"].replace("http://localhost", "http://127.0.0.1")
+        data = (workspace["docs"] / "report.pdf").read_bytes()
+        async with httpx2.AsyncClient() as http:
+            await http.put(url, content=data[:100], headers={"Content-Range": f"bytes 0-99/{len(data)}"})
+            proc.terminate()
+            proc.wait(timeout=10)
+            proc = _start_http(port, env)
+            assert (await http.get(url, params={"status": 1})).json()["received"] == 100
+            done = await http.put(url, content=data[100:], headers={"Content-Range": f"bytes 100-{len(data) - 1}/{len(data)}"})
+            assert done.json()["status"] == "uploaded"
+        key = workspace["data"] / "upload_secret"
+        assert key.stat().st_mode & 0o777 == 0o600 and len(key.read_text()) >= 32
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
 @pytest.mark.anyio
 async def test_http_upload_flow(workspace: dict[str, Path]) -> None:
     port, token = _free_port(), "test-token"
-    proc = subprocess.Popen([*SERVER_CMD, "--http", "--port", str(port)],
-                            env=server_env(workspace, READER_AUTH_TOKEN=token, READER_UPLOAD_SECRET="s3cret"),
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    proc = _start_http(port, server_env(workspace, READER_AUTH_TOKEN=token, READER_UPLOAD_SECRET="s3cret"))
     try:
         base = f"http://127.0.0.1:{port}"
-        for _ in range(100):
-            try:
-                socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
-                break
-            except OSError:
-                time.sleep(0.1)
-
         async with httpx2.AsyncClient() as http:
             assert (await http.post(f"{base}/mcp", json={})).status_code == 401
 
