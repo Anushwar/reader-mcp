@@ -1,0 +1,222 @@
+{
+ "document": "The Hundred-Page Machine Learning Book by Andriy Burkov (152-page PDF, distributed by the author on a read-first-buy-later basis)",
+ "note": "gold = PDF page numbers (1-based) where the answer is stated, verified against the rendered pages",
+ "questions": [
+  {
+   "id": 1,
+   "q": "In the book's spam-filter SVM example, how many labeled examples are in the dataset?",
+   "kw": "spam SVM dataset examples",
+   "answer": [
+    "10,000",
+    "10000",
+    "10 000"
+   ],
+   "gold": [
+    9,
+    10
+   ]
+  },
+  {
+   "id": 2,
+   "q": "Which kernel does the book call the most widely used kernel function?",
+   "kw": "most widely used kernel",
+   "answer": [
+    "RBF",
+    "radial basis"
+   ],
+   "gold": [
+    41
+   ]
+  },
+  {
+   "id": 3,
+   "q": "Besides L1 and L2, which two regularization techniques does the book say neural networks benefit from?",
+   "kw": "neural networks regularization techniques",
+   "answer": [
+    "dropout",
+    "batch"
+   ],
+   "all": true,
+   "gold": [
+    64,
+    112,
+    113
+   ]
+  },
+  {
+   "id": 4,
+   "q": "What names does the literature use for L2 and L1 regularization?",
+   "kw": "L2 L1 regularization name literature",
+   "answer": [
+    "ridge",
+    "lasso"
+   ],
+   "all": true,
+   "gold": [
+    64
+   ]
+  },
+  {
+   "id": 5,
+   "q": "Which two algorithms create synthetic minority-class examples for imbalanced datasets?",
+   "kw": "synthetic examples minority class",
+   "answer": [
+    "SMOTE",
+    "ADASYN"
+   ],
+   "all": true,
+   "gold": [
+    110
+   ]
+  },
+  {
+   "id": 6,
+   "q": "What are the three typical ways to combine models?",
+   "kw": "ways to combine models",
+   "answer": [
+    "averaging",
+    "majority vote",
+    "stacking"
+   ],
+   "all": true,
+   "gold": [
+    110,
+    111
+   ]
+  },
+  {
+   "id": 7,
+   "q": "What practical method does the book describe for determining the number of clusters?",
+   "kw": "determining number of clusters",
+   "answer": [
+    "prediction strength"
+   ],
+   "gold": [
+    125,
+    126,
+    127
+   ]
+  },
+  {
+   "id": 8,
+   "q": "Which clustering algorithm does the book recommend always trying first?",
+   "kw": "clustering algorithm try first",
+   "answer": [
+    "HDBSCAN"
+   ],
+   "gold": [
+    124,
+    125
+   ]
+  },
+  {
+   "id": 9,
+   "q": "In metric learning, what property must the matrix A have?",
+   "kw": "metric learning matrix A property",
+   "answer": [
+    "positive semidefinite",
+    "positive semi-definite"
+   ],
+   "gold": [
+    138
+   ]
+  },
+  {
+   "id": 10,
+   "q": "What AUC means a classifier is no better than random, and what AUC does a perfect classifier have?",
+   "kw": "AUC random classifier perfect",
+   "answer": [
+    "0.5",
+    "1"
+   ],
+   "all": true,
+   "gold": [
+    69
+   ]
+  },
+  {
+   "id": 11,
+   "q": "What loss function is used to train a siamese neural network for one-shot learning?",
+   "kw": "siamese network one-shot learning loss",
+   "answer": [
+    "triplet"
+   ],
+   "gold": [
+    104,
+    105
+   ]
+  },
+  {
+   "id": 12,
+   "q": "Which measure of similarity between probability distributions does UMAP minimize?",
+   "kw": "UMAP similarity probability distributions",
+   "answer": [
+    "cross-entropy",
+    "cross entropy"
+   ],
+   "gold": [
+    133
+   ]
+  },
+  {
+   "id": 13,
+   "q": "Under what other names are probabilistic graphical models known?",
+   "kw": "probabilistic graphical models other names",
+   "answer": [
+    "Bayesian network",
+    "belief network"
+   ],
+   "all": true,
+   "gold": [
+    150
+   ]
+  }
+ ],
+ "paraphrases": [
+  {
+   "query": "handling skewed class distributions",
+   "gold": [
+    109,
+    110
+   ]
+  },
+  {
+   "query": "how many groups should my data be split into",
+   "gold": [
+    125,
+    126,
+    127
+   ]
+  },
+  {
+   "query": "randomly switch off neurons while training",
+   "gold": [
+    112
+   ]
+  },
+  {
+   "query": "squash high dimensional data into two dimensions for plotting",
+   "gold": [
+    131,
+    132,
+    133,
+    134
+   ]
+  },
+  {
+   "query": "recognize the same person from a single photo",
+   "gold": [
+    104
+   ]
+  }
+ ],
+ "recall_words": [
+  "overfitting",
+  "classification",
+  "classifier",
+  "confidence",
+  "regression",
+  "gradient",
+  "kernel"
+ ]
+}

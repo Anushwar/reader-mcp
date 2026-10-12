@@ -1,0 +1,103 @@
+# ---------------------------------------------------------------- Python / build
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+wheels/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+
+# ---------------------------------------------------------------- tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyright/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+
+# ---------------------------------------------------------------- secrets & local config
+.env
+.env.*
+!.env.example
+.envrc
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.jks
+id_rsa*
+id_ed25519*
+secrets/
+credentials*.json
+service-account*.json
+.netrc
+.npmrc
+.pypirc
+
+# ---------------------------------------------------------------- runtime data
+# Ingested documents, uploads and extracted text (default lives in ~/.reader-mcp).
+data/
+.reader-mcp/
+uploads/
+tmp/
+temp/
+.scratch*/
+*.log
+*.sqlite
+*.db
+
+# ---------------------------------------------------------------- documents & fixtures
+# Tests generate their own files at runtime; real or sample documents never belong here.
+*.pdf
+*.docx
+*.doc
+*.odt
+*.rtf
+*.csv
+*.tsv
+*.xlsx
+*.xls
+*.pptx
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.tif
+*.tiff
+*.webp
+*.zip
+samples/
+fixtures/
+mock*/
+mocks/
+
+# ---------------------------------------------------------------- editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ---------------------------------------------------------------- AI assistants / personal notes
+# README.md is the only markdown file that ships.
+.claude/
+.cursor/
+.aider*
+CLAUDE.md
+AGENTS.md
+*.md
+!README.md
+notes/
