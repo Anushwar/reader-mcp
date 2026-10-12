@@ -1,4 +1,4 @@
-"""Turn raw file bytes into text units (pages, sections or row blocks) plus document properties.
+"""Turn a file into text units (pages, sections or row blocks) plus document properties.
 
 Parsing untrusted files is risky, so the server never calls `extract` directly: it runs
 `python -m reader_mcp.extractors <file> <filename>` in a child process with a timeout
@@ -21,14 +21,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-EXTRACTOR_VERSION = 3  # bump when extraction output changes so stored documents get re-extracted
+EXTRACTOR_VERSION = 4  # bump when extraction output changes so stored documents get re-extracted
 CHUNK_CHARS = 4000  # size of a "section" for formats without real pages
-LINE_BREAK_HYPHEN = re.compile(r"(?<=\w)-\s*\n\s*(?=[a-z])")
 CSV_ROWS_PER_UNIT = 200
 MAX_UNZIPPED_BYTES = 300 * 1024 * 1024  # zip-bomb guard for .docx
 OCR_MIN_CHARS_PER_PAGE = 25
+LINE_BREAK_HYPHEN = re.compile(r"(?<=\w)-\s*\n\s*(?=[a-z])")
 
 IMAGE_MAGIC = (b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"II*\x00", b"MM\x00*", b"RIFF")
+WEB_PAGE = "This is a web page (HTML), not a document. reader handles PDF, DOCX and text files."
 
 
 class UnsupportedFile(ValueError):
@@ -46,7 +47,7 @@ def normalize_text(text: str) -> str:
     """NFKC turns typographic ligatures ("ﬁ" -> "fi") and other compatibility characters into
     plain text. Without it, PDFs typeset with ligatures are unsearchable for words like
     "classification". Soft hyphens are invisible line-break hints, so drop them."""
-    return unicodedata.normalize("NFKC", text).replace("­", "")
+    return unicodedata.normalize("NFKC", text).replace("\u00ad", "")
 
 
 def _decode(data: bytes) -> tuple[str, str]:
@@ -89,10 +90,11 @@ def _md_cell(value: str) -> str:
 # --------------------------------------------------------------------------- formats
 
 
-def extract_pdf(data: bytes, filename: str) -> dict[str, Any]:
+def _pdf_properties(path: Path) -> dict[str, Any]:
+    """Document info via pypdf, which parses PDF dates; the text itself comes from pdfium."""
     from pypdf import PdfReader
 
-    reader = PdfReader(io.BytesIO(data))
+    reader = PdfReader(path)
     if reader.is_encrypted:
         try:
             unlocked = reader.decrypt("")
@@ -100,27 +102,11 @@ def extract_pdf(data: bytes, filename: str) -> dict[str, Any]:
             unlocked = 0
         if not unlocked:
             raise UnsupportedFile("PDF is password-protected")
-
-    pages = []
-    for page in reader.pages:
-        try:
-            text = page.extract_text() or ""
-        except Exception:
-            text = ""
-        # Re-join words hyphenated at a line break ("classifica-\ntion"), as other extractors do.
-        pages.append(LINE_BREAK_HYPHEN.sub("", text).strip())
-
     info: dict[str, Any] = {}
     try:
         meta = reader.metadata
         if meta:
-            info = {
-                "title": _iso(meta.title),
-                "author": _iso(meta.author),
-                "subject": _iso(meta.subject),
-                "creator": _iso(meta.creator),
-                "producer": _iso(meta.producer),
-            }
+            info = {key: _iso(getattr(meta, key)) for key in ("title", "author", "subject", "creator", "producer")}
             for key, attr in (("created", "creation_date"), ("modified", "modification_date")):
                 try:
                     info[key] = _iso(getattr(meta, attr))
@@ -128,6 +114,27 @@ def extract_pdf(data: bytes, filename: str) -> dict[str, Any]:
                     pass
     except Exception:
         pass
+    return _clean(info)
+
+
+def extract_pdf(path: Path, filename: str) -> dict[str, Any]:
+    import pypdfium2 as pdfium
+
+    properties = _pdf_properties(path)
+    pages = []
+    document = pdfium.PdfDocument(path)  # Chrome's PDF engine: ~25x faster than pure-Python parsing
+    try:
+        for index in range(len(document)):
+            page = document[index]
+            textpage = page.get_textpage()
+            text = textpage.get_text_range()
+            textpage.close()
+            page.close()
+            # pdfium marks a hyphen it removed at a line break with U+FFFE; drop it to re-join the word.
+            text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\ufffe", "")
+            pages.append(LINE_BREAK_HYPHEN.sub("", text).strip())
+    finally:
+        document.close()
 
     empty = [i + 1 for i, text in enumerate(pages) if len(text) < OCR_MIN_CHARS_PER_PAGE]
     needs_ocr = bool(pages) and len(empty) == len(pages)
@@ -137,22 +144,22 @@ def extract_pdf(data: bytes, filename: str) -> dict[str, Any]:
     return {
         "unit": "page",
         "pages": pages,
-        "properties": _clean(info),
+        "properties": properties,
         "needs_ocr": needs_ocr,
         "ocr_reason": "No embedded text found; likely a scanned or image-only PDF." if needs_ocr else None,
         "extra": extra,
     }
 
 
-def extract_docx(data: bytes, filename: str) -> dict[str, Any]:
+def extract_docx(path: Path, filename: str) -> dict[str, Any]:
     from docx import Document
     from docx.table import Table
 
-    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+    with zipfile.ZipFile(path) as zf:
         if sum(info.file_size for info in zf.infolist()) > MAX_UNZIPPED_BYTES:
             raise UnsupportedFile("DOCX expands to an unreasonable size (possible zip bomb)")
 
-    doc = Document(io.BytesIO(data))
+    doc = Document(str(path))
     blocks: list[str] = []
     headings: list[str] = []
     tables = 0
@@ -215,8 +222,8 @@ def _column_type(values: list[str]) -> str:
     return "text"
 
 
-def extract_table(data: bytes, filename: str) -> dict[str, Any]:
-    text, encoding = _decode(data)
+def extract_table(path: Path, filename: str) -> dict[str, Any]:
+    text, encoding = _decode(path.read_bytes())
     csv.field_size_limit(10 * 1024 * 1024)
     if filename.lower().endswith(".tsv"):
         delimiter = "\t"
@@ -256,8 +263,8 @@ def extract_table(data: bytes, filename: str) -> dict[str, Any]:
     }
 
 
-def extract_text(data: bytes, filename: str) -> dict[str, Any]:
-    text, encoding = _decode(data)
+def extract_text(path: Path, filename: str) -> dict[str, Any]:
+    text, encoding = _decode(path.read_bytes())
     props: dict[str, Any] = {}
     extra: dict[str, Any] = {"encoding": encoding, "line_count": text.count("\n") + 1}
     if filename.lower().endswith((".md", ".markdown")):
@@ -273,7 +280,7 @@ def extract_text(data: bytes, filename: str) -> dict[str, Any]:
             "ocr_reason": None, "extra": extra}
 
 
-EXTRACTORS: dict[str, Callable[[bytes, str], dict[str, Any]]] = {
+EXTRACTORS: dict[str, Callable[[Path, str], dict[str, Any]]] = {
     "pdf": extract_pdf,
     "docx": extract_docx,
     "csv": extract_table,
@@ -285,31 +292,35 @@ EXTRACTORS: dict[str, Callable[[bytes, str], dict[str, Any]]] = {
 # --------------------------------------------------------------------------- dispatch
 
 
-def detect_type(data: bytes, filename: str) -> str:
+def detect_type(path: Path, filename: str) -> str:
     """Detect the format from content first (magic bytes), then the extension."""
+    with path.open("rb") as file:
+        head = file.read(8192)
     ext = Path(filename).suffix.lower().lstrip(".")
-    if data.startswith(b"%PDF-"):
+    if b"%PDF-" in head[:1024]:
         return "pdf"
-    if data.startswith(b"PK\x03\x04"):
+    if head.startswith(b"PK\x03\x04"):
         try:
-            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            with zipfile.ZipFile(path) as zf:
                 if "word/document.xml" in zf.namelist():
                     return "docx"
         except zipfile.BadZipFile:
             pass
         raise UnsupportedFile("ZIP-based file that is not a .docx (xlsx/pptx are not supported yet)")
-    if data.startswith(IMAGE_MAGIC):
+    if head.startswith(IMAGE_MAGIC):
         raise UnsupportedFile("Images need OCR, which is not supported yet")
-    if b"\x00" in data[:8192]:
+    if b"\x00" in head:
         raise UnsupportedFile("Binary file type is not supported")
+    if head.lstrip(b"\xef\xbb\xbf \t\r\n").lower().startswith((b"<!doctype html", b"<html")):
+        raise UnsupportedFile(WEB_PAGE)
     if ext in ("csv", "tsv"):
         return ext
     return "text"
 
 
-def extract(data: bytes, filename: str) -> dict[str, Any]:
-    kind = detect_type(data, filename)
-    result = EXTRACTORS[kind](data, filename)
+def extract(path: Path, filename: str) -> dict[str, Any]:
+    kind = detect_type(path, filename)
+    result = EXTRACTORS[kind](path, filename)
     result["pages"] = [normalize_text(page) for page in result["pages"]]
     if kind == "text":
         ext = Path(filename).suffix.lower().lstrip(".")
@@ -344,7 +355,7 @@ async def extract_isolated(path: Path, filename: str, timeout: float) -> dict[st
 def _main() -> None:
     path, filename = sys.argv[1], sys.argv[2]
     try:
-        payload = {"ok": True, "result": extract(Path(path).read_bytes(), filename)}
+        payload = {"ok": True, "result": extract(Path(path), filename)}
     except UnsupportedFile as exc:
         payload = {"ok": False, "error": str(exc)}
     except Exception as exc:  # parser bugs, corrupt files, ...

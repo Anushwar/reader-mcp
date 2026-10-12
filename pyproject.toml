@@ -12,6 +12,7 @@ dependencies = [
     "mcp>=2.3,<3",
     "httpx2>=2.13",
     "pypdf>=5.0",
+    "pypdfium2>=5.0",
     "python-docx>=1.1",
 ]
 

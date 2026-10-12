@@ -61,7 +61,7 @@ class Settings:
         return cls(
             data_dir=Path(_env("DATA_DIR") or Path.home() / ".reader-mcp").expanduser().resolve(),
             allowed_roots=roots,
-            max_file_bytes=int(_number("MAX_FILE_MB", 50) * 1024 * 1024),
+            max_file_bytes=int(_number("MAX_FILE_MB", 200) * 1024 * 1024),
             extract_timeout=_number("EXTRACT_TIMEOUT", 120),
             retention_hours=_number("RETENTION_HOURS", 24),
             public_url=public_url,

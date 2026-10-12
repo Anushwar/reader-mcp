@@ -11,6 +11,7 @@ Point Claude Code, Claude Desktop, Cursor, ChatGPT or your own agent at a docume
 - **Formats:** PDF, DOCX, CSV/TSV, TXT, Markdown, JSON. The type is detected from the file's content, not just its extension.
 - **Metadata without an LLM:** page and word counts, title, author and dates, DOCX headings and tables, CSV column types, and scanned-PDF detection (`needs_ocr`).
 - **Built for context limits:** paginated reading, ranked keyword search with page numbers, and a persistent library you ingest into once.
+- **Fast on long documents:** PDF text comes from pdfium, Chrome's PDF engine, so a 500-page PDF ingests in about 4 s. Files stream to disk (200 MB by default), and if a host gives up on a slow ingest, the job keeps running and a retry picks up the result.
 - **Works with any host:** files arrive as a local path, an HTTPS URL, a ChatGPT file attachment, a signed upload link, or base64.
 - **Safe defaults:**
   - parsers run in a separate process with a timeout
@@ -83,6 +84,8 @@ Add `https://<your-tunnel-host>/mcp` as a connector: Developer mode in ChatGPT, 
 - **ChatGPT** attaches the file. reader declares `openai/fileParams`, so ChatGPT passes a temporary download link and the server fetches the file itself.
 - **Claude.ai** can't hand files to connectors. The model calls `create_upload_url` and uploads the file from its code sandbox with `curl`. Allow your tunnel's domain under *Settings → Capabilities → Code execution*, or open the link in a browser and upload by hand.
 
+**Files bigger than the chat allows:** ask the assistant for an upload link (`create_upload_url`) and upload in the browser. The file goes straight to reader without passing through the chat, so only `READER_MAX_FILE_MB` applies.
+
 A tunnel exposes the server publicly, so only keep it running while you're testing. For clients that can send headers, set `READER_AUTH_TOKEN`.
 
 ## How files get in
@@ -90,7 +93,7 @@ A tunnel exposes the server publicly, so only keep it running while you're testi
 | Input | When to use it | Direction |
 | --- | --- | --- |
 | `path` | The server runs on the same machine as the files (stdio). Limited to `READER_ALLOWED_ROOTS`. | local |
-| `url` | Any HTTPS link, e.g. a presigned S3 URL. Private and internal addresses are blocked. | server pulls |
+| `url` | An HTTPS link to a document, e.g. a presigned S3 URL. Google Drive, Google Docs and Dropbox share links are converted automatically; web pages and private addresses are refused. | server pulls |
 | `file` | ChatGPT file attachments (`openai/fileParams`). | server pulls |
 | `upload_id` | The file is somewhere the server can't reach (an agent sandbox, a laptop). Get a signed link from `create_upload_url`, then `PUT` the bytes. | client pushes |
 | `content_base64` | Small files only. Base64 adds ~33% and travels through the model's context. | inline |
@@ -115,7 +118,7 @@ Every setting is optional and comes from environment variables. See [`.env.examp
 | --- | --- | --- |
 | `READER_DATA_DIR` | `~/.reader-mcp` | Where documents and extracted text are stored |
 | `READER_ALLOWED_ROOTS` | home folder (stdio), none (HTTP) | Folders `path` may read; hidden files are always refused |
-| `READER_MAX_FILE_MB` | `50` | Largest accepted file |
+| `READER_MAX_FILE_MB` | `200` | Largest accepted file |
 | `READER_RETENTION_HOURS` | `24` | Auto-delete age (`0` keeps documents forever) |
 | `READER_EXTRACT_TIMEOUT` | `120` | Seconds before an extraction is killed |
 | `READER_PUBLIC_URL` | `http://localhost:<port>` | Public base URL, used for upload links and allowed hosts |
@@ -136,7 +139,7 @@ Tested on *The Hundred-Page Machine Learning Book* (152 pages). Each of 7 factua
 | Median time per question, shuffled | **13 s** | 47 s |
 | Total cost, shuffled | **$0.58** | $8.10 |
 
-Shuffling the pages simulates a document the model has never seen. On the original book, the built-in reader jumps to the right chapter from memory. Without that, it has to read most of the book to find each answer. Ingesting the book took 31 s once. Search alone (no LLM) put the correct page first for 13 of 13 questions.
+Shuffling the pages simulates a document the model has never seen. On the original book, the built-in reader jumps to the right chapter from memory. Without that, it has to read most of the book to find each answer. Ingesting the book takes 1.5 s, once. Search alone (no LLM) put the correct page first for 13 of 13 questions.
 
 Reproduce with your own copy of the book (the answer key is in [`eval/questions.json`](eval/questions.json)):
 
@@ -151,6 +154,7 @@ uv run python eval/agents.py book.pdf --shuffle         # headless Claude Code c
 - **No OCR yet.** Scanned PDFs and images are flagged with `needs_ocr`, and the extractor registry is where an OCR backend would plug in.
 - **Text only.** Charts, diagrams and image content aren't extracted, and figure labels can come out in a jumbled order.
 - **Keyword search, not semantic.** Paraphrased questions that share no words with the text can miss.
+- **No login-protected links.** URLs must be publicly downloadable over HTTPS; for private files, use a presigned URL or an upload link.
 - **No XLSX or PPTX yet.**
 
 ## Development

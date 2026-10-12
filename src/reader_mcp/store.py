@@ -1,18 +1,18 @@
-"""On-disk document library: <data_dir>/docs/<doc_id>/{original, doc.json}.
+"""On-disk document library: <data_dir>/docs/<doc_id>/{original, meta.json, pages.json}.
 
 doc_id is derived from the file's SHA-256, so ingesting the same bytes twice is a no-op.
+Metadata and page text live in separate files so listing documents never loads their text.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import os
 import re
 import shutil
 import time
-from collections import Counter
+from collections import Counter, OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -25,6 +25,7 @@ DOC_ID = re.compile(r"^[a-f0-9]{16}$")
 WORD = re.compile(r"\w+", re.UNICODE)
 PREVIEW_CHARS = 600
 SNIPPET_CHARS = 280
+CACHED_DOCS = 16
 
 
 class NotFound(LookupError):
@@ -36,25 +37,27 @@ class Store:
         self.settings = settings
         self.docs = settings.data_dir / "docs"
         self.uploads = settings.data_dir / "uploads"
-        for folder in (settings.data_dir, self.docs, self.uploads):
+        self.tmp = settings.data_dir / "tmp"
+        for folder in (settings.data_dir, self.docs, self.uploads, self.tmp):
             folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self._pages: OrderedDict[str, tuple[int, list[str]]] = OrderedDict()  # small LRU of page text
 
     # ----------------------------------------------------------------- write
 
     async def ingest(self, incoming: Incoming) -> dict[str, Any]:
         self.purge_expired()
-        digest = hashlib.sha256(incoming.data).hexdigest()
-        doc_id = digest[:16]
+        doc_id = incoming.sha256[:16]
         folder = self.docs / doc_id
-        if (folder / "doc.json").exists():
+        if self.has(doc_id):
             existing = self.metadata(doc_id)
             if existing.get("extractor_version") == EXTRACTOR_VERSION:
+                incoming.path.unlink(missing_ok=True)
                 os.utime(folder)  # restart the retention clock
                 return {**existing, "already_ingested": True}
 
         folder.mkdir(mode=0o700, exist_ok=True)
         original = folder / "original"
-        original.write_bytes(incoming.data)
+        os.replace(incoming.path, original)
         try:
             result = await extract_isolated(original, incoming.filename, self.settings.extract_timeout)
         except Exception:
@@ -68,8 +71,8 @@ class Store:
             "filename": incoming.filename,
             "type": result["type"],
             "source": incoming.source,
-            "size_bytes": len(incoming.data),
-            "sha256": digest,
+            "size_bytes": incoming.size,
+            "sha256": incoming.sha256,
             "unit": result["unit"],
             "unit_count": len(pages),
             "char_count": len(full_text),
@@ -81,56 +84,67 @@ class Store:
             "ingested_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "extractor_version": EXTRACTOR_VERSION,
         }
-        tmp = folder / "doc.json.tmp"
-        tmp.write_text(json.dumps({"metadata": metadata, "pages": pages}))
-        tmp.replace(folder / "doc.json")
+        _write_json(folder / "pages.json", pages)
+        _write_json(folder / "meta.json", metadata)  # written last: its presence marks the document as ready
         return {**metadata, "preview": full_text[:PREVIEW_CHARS]}
 
-    def delete(self, doc_id: str) -> bool:
-        folder = self._folder(doc_id)
-        shutil.rmtree(folder)
-        return True
+    def delete(self, doc_id: str) -> None:
+        shutil.rmtree(self._folder(doc_id))
+        self._pages.pop(doc_id, None)
 
     def purge_expired(self) -> None:
-        """Delete documents older than READER_RETENTION_HOURS and stale uploads."""
+        """Delete documents older than READER_RETENTION_HOURS, stale uploads and abandoned temp files."""
         now = time.time()
         if self.settings.retention_hours > 0:
             cutoff = now - self.settings.retention_hours * 3600
             for folder in self.docs.iterdir():
                 if folder.is_dir() and folder.stat().st_mtime < cutoff:
                     shutil.rmtree(folder, ignore_errors=True)
-        upload_cutoff = now - 2 * self.settings.upload_ttl
-        for file in self.uploads.iterdir():
-            if file.stat().st_mtime < upload_cutoff:
-                file.unlink(missing_ok=True)
+                    self._pages.pop(folder.name, None)
+        for folder, max_age in ((self.uploads, 2 * self.settings.upload_ttl), (self.tmp, 24 * 3600)):
+            for file in folder.iterdir():
+                if file.stat().st_mtime < now - max_age:
+                    file.unlink(missing_ok=True)
 
     # ----------------------------------------------------------------- read
 
+    def has(self, doc_id: str) -> bool:
+        return bool(DOC_ID.match(doc_id or "")) and (self.docs / doc_id / "meta.json").exists()
+
     def _folder(self, doc_id: str) -> Path:
-        if not DOC_ID.match(doc_id or "") or not (self.docs / doc_id / "doc.json").exists():
+        if not self.has(doc_id):
             raise NotFound(f"Unknown doc_id: {doc_id}. Call list_documents to see what's available.")
         return self.docs / doc_id
 
-    def _load(self, doc_id: str) -> dict[str, Any]:
-        return json.loads((self._folder(doc_id) / "doc.json").read_text())
-
     def metadata(self, doc_id: str) -> dict[str, Any]:
-        return self._load(doc_id)["metadata"]
+        return json.loads((self._folder(doc_id) / "meta.json").read_text())
+
+    def pages(self, doc_id: str) -> list[str]:
+        path = self._folder(doc_id) / "pages.json"
+        stamp = path.stat().st_mtime_ns
+        cached = self._pages.get(doc_id)
+        if cached and cached[0] == stamp:
+            self._pages.move_to_end(doc_id)
+            return cached[1]
+        pages = json.loads(path.read_text())
+        self._pages[doc_id] = (stamp, pages)
+        if len(self._pages) > CACHED_DOCS:
+            self._pages.popitem(last=False)
+        return pages
 
     def list(self) -> list[dict[str, Any]]:
         items = []
         for folder in self.docs.iterdir():
-            path = folder / "doc.json"
+            path = folder / "meta.json"
             if path.exists():
-                meta = json.loads(path.read_text())["metadata"]
+                meta = json.loads(path.read_text())
                 items.append({k: meta.get(k) for k in
                               ("doc_id", "filename", "type", "unit", "unit_count", "word_count",
                                "needs_ocr", "ingested_at")} | {"title": meta["properties"].get("title")})
         return sorted(items, key=lambda m: m["ingested_at"], reverse=True)
 
     def read(self, doc_id: str, start: int, end: int | None, max_chars: int) -> dict[str, Any]:
-        doc = self._load(doc_id)
-        pages, meta = doc["pages"], doc["metadata"]
+        meta, pages = self.metadata(doc_id), self.pages(doc_id)
         total = len(pages)
         if not 1 <= start <= total:
             raise ValueError(f"start must be between 1 and {total}.")
@@ -160,9 +174,8 @@ class Store:
         doc_ids = [doc_id] if doc_id else [m["doc_id"] for m in self.list()]
         units = []  # (doc_id, filename, unit, n, text, counts)
         for did in doc_ids:
-            doc = self._load(did)
-            meta = doc["metadata"]
-            for n, text in enumerate(doc["pages"], 1):
+            meta = self.metadata(did)
+            for n, text in enumerate(self.pages(did), 1):
                 units.append((did, meta["filename"], meta["unit"], n, text, Counter(WORD.findall(text.lower()))))
         if not units:
             return []
@@ -183,3 +196,9 @@ class Store:
             hits.append({"doc_id": did, "filename": filename, unit: n, "score": round(score, 3),
                          "snippet": ("…" if lo else "") + snippet + ("…" if lo + SNIPPET_CHARS < len(text) else "")})
         return sorted(hits, key=lambda h: h["score"], reverse=True)[:limit]
+
+
+def _write_json(path: Path, value: Any) -> None:
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(value))
+    tmp.replace(path)

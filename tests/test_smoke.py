@@ -174,6 +174,29 @@ async def test_stdio_end_to_end(workspace: dict[str, Path]) -> None:
         assert "https" in (await call(client, "ingest_document", url="http://example.com/a.pdf"))["error"]
         assert "private" in (await call(client, "ingest_document", url="https://127.0.0.1/a.pdf"))["error"]
         assert "exactly one" in (await call(client, "ingest_document"))["error"]
+        page = base64.b64encode(b"<!DOCTYPE html><html><body>Not a document</body></html>").decode()
+        assert "web page" in (await call(client, "ingest_document", content_base64=page, filename="x.txt"))["error"]
+
+        # Retry-safe: the client gives up mid-ingest (as hosts do after ~60s); the server finishes
+        # the job anyway, and asking again returns the document.
+        (docs / "long.txt").write_text("Appendix on retention policies.\n" * 5000)
+        with pytest.raises(Exception):
+            result = await client.call_tool("ingest_document", {"path": str(docs / "long.txt")}, read_timeout_seconds=0.01)
+            if result.is_error:
+                raise RuntimeError(result.content)
+        retried = await call(client, "ingest_document", path=str(docs / "long.txt"))
+        assert retried["filename"] == "long.txt" and retried["word_count"] == 20000
+
+
+def test_share_links_become_downloads() -> None:
+    from reader_mcp.sources import direct_download_url
+
+    drive = direct_download_url("https://drive.google.com/file/d/1AbC_d-9/view?usp=sharing")
+    assert drive == "https://drive.usercontent.google.com/download?id=1AbC_d-9&export=download&confirm=t"
+    gdoc = direct_download_url("https://docs.google.com/document/d/1XyZ/edit?usp=sharing")
+    assert gdoc == "https://docs.google.com/document/d/1XyZ/export?format=docx"
+    assert direct_download_url("https://www.dropbox.com/scl/fi/abc/report.pdf?rlkey=k&dl=0").endswith("rlkey=k&dl=1")
+    assert direct_download_url("https://arxiv.org/pdf/1706.03762") == "https://arxiv.org/pdf/1706.03762"
 
 
 # --------------------------------------------------------------------------- http
