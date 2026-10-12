@@ -94,7 +94,7 @@ async def handle_upload(request: Request, settings: Settings) -> Response:
     folder = settings.data_dir / "uploads"
     upload_id = claims["u"]
     blob, partial, state = (folder / f"{upload_id}{ext}" for ext in (".bin", ".part", ".json"))
-    if claims.get("e", 0) < time.time() and not partial.exists():
+    if claims.get("e", 0) < time.time() and not (partial.exists() or blob.exists()):  # expiry only blocks new uploads
         return _reply({"error": "Upload link has expired. Ask for a new one."}, 403)
 
     if request.method == "GET":
